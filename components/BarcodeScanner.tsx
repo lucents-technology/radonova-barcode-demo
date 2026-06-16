@@ -1,8 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback } from "react";
-import { BrowserMultiFormatReader, type IScannerControls } from "@zxing/browser";
-import { BarcodeFormat, Exception } from "@zxing/library";
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
+import { readBarcodes } from "zxing-wasm/reader";
 import { getFormatLabel } from "@/lib/barcode-formats";
 import { saveScan } from "@/lib/scan-storage";
 
@@ -13,13 +12,23 @@ interface DeviceInfo {
 
 interface ScanResult {
   value: string;
-  format: BarcodeFormat;
+  format: string;
   timestamp: number;
+}
+
+function checkCameraSupport(): boolean {
+  if (typeof navigator === "undefined") return false;
+  return !!(navigator.mediaDevices && navigator.mediaDevices.enumerateDevices);
 }
 
 export default function BarcodeScanner() {
   const videoRef = useRef<HTMLVideoElement>(null);
-  const codeReaderRef = useRef<BrowserMultiFormatReader | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const animationRef = useRef<number>(0);
+  const scanningRef = useRef(false);
+  const scanLoopRef = useRef<(() => void) | null>(null);
+
   const [isScanning, setIsScanning] = useState(false);
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
   const [selectedDevice, setSelectedDevice] = useState<string>("");
@@ -27,38 +36,28 @@ export default function BarcodeScanner() {
   const [error, setError] = useState<string | null>(null);
   const [manualInput, setManualInput] = useState("");
   const [torchOn, setTorchOn] = useState(false);
-  const controlsRef = useRef<IScannerControls | null>(null);
 
-  const handleScanResult = useCallback((result: ScanResult) => {
-    setLastResult(result);
-    saveScan(result.value, getFormatLabel(result.format));
-  }, []);
-
-  const stopScanning = useCallback(() => {
-    if (controlsRef.current) {
-      controlsRef.current.stop();
-      controlsRef.current = null;
-    }
-    setIsScanning(false);
-    setTorchOn(false);
-  }, []);
+  const cameraSupported = useMemo(() => checkCameraSupport(), []);
 
   useEffect(() => {
-    codeReaderRef.current = new BrowserMultiFormatReader();
+    if (!cameraSupported) return;
 
-    BrowserMultiFormatReader.listVideoInputDevices()
-      .then((videoInputDevices) => {
-        const deviceList = videoInputDevices.map((d) => ({
-          deviceId: d.deviceId,
-          label: d.label || `Camera ${d.deviceId.slice(0, 8)}`,
-        }));
-        setDevices(deviceList);
+    navigator.mediaDevices
+      .enumerateDevices()
+      .then((deviceList) => {
+        const videoDevices = deviceList
+          .filter((d) => d.kind === "videoinput")
+          .map((d) => ({
+            deviceId: d.deviceId,
+            label: d.label || `Camera ${d.deviceId.slice(0, 8)}`,
+          }));
+        setDevices(videoDevices);
 
-        if (deviceList.length > 0) {
-          const backCamera = deviceList.find((d) =>
+        if (videoDevices.length > 0) {
+          const backCamera = videoDevices.find((d) =>
             d.label.toLowerCase().includes("back")
           );
-          setSelectedDevice(backCamera?.deviceId ?? deviceList[0].deviceId);
+          setSelectedDevice(backCamera?.deviceId ?? videoDevices[0].deviceId);
         }
       })
       .catch(() => {
@@ -66,48 +65,136 @@ export default function BarcodeScanner() {
       });
 
     return () => {
-      if (controlsRef.current) {
-        controlsRef.current.stop();
-        controlsRef.current = null;
+      scanningRef.current = false;
+      if (animationRef.current) {
+        cancelAnimationFrame(animationRef.current);
+      }
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((track) => track.stop());
       }
     };
+  }, [cameraSupported]);
+
+  const handleScanResult = useCallback((result: ScanResult) => {
+    setLastResult(result);
+    saveScan(result.value, getFormatLabel(result.format));
+  }, []);
+
+  const processFrame = useCallback(async () => {
+    if (!videoRef.current || !canvasRef.current) return;
+
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext("2d");
+
+    if (!ctx || video.readyState !== video.HAVE_ENOUGH_DATA) return;
+
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+    try {
+      const results = await readBarcodes(imageData, {
+        tryHarder: true,
+        maxNumberOfSymbols: 1,
+      });
+
+      if (results.length > 0) {
+        const result = results[0];
+        handleScanResult({
+          value: result.text,
+          format: result.format,
+          timestamp: Date.now(),
+        });
+      }
+    } catch {
+      // Decode error - no barcode found in this frame
+    }
+  }, [handleScanResult]);
+
+  useEffect(() => {
+    scanLoopRef.current = async () => {
+      if (!scanningRef.current) return;
+      await processFrame();
+      if (scanningRef.current) {
+        animationRef.current = requestAnimationFrame(() => scanLoopRef.current?.());
+      }
+    };
+  }, [processFrame]);
+
+  const stopScanning = useCallback(() => {
+    scanningRef.current = false;
+
+    if (animationRef.current) {
+      cancelAnimationFrame(animationRef.current);
+      animationRef.current = 0;
+    }
+
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+
+    setIsScanning(false);
+    setTorchOn(false);
   }, []);
 
   const startScanning = useCallback(async () => {
-    if (!codeReaderRef.current || !videoRef.current || !selectedDevice) return;
+    if (!selectedDevice) return;
 
     setError(null);
-    setIsScanning(true);
 
     try {
-      const controls = await codeReaderRef.current.decodeFromVideoDevice(
-        selectedDevice,
-        videoRef.current,
-        (result, err) => {
-          if (result) {
-            handleScanResult({
-              value: result.getText(),
-              format: result.getBarcodeFormat(),
-              timestamp: Date.now(),
-            });
-          }
-          if (err && !(err instanceof Exception)) {
-            setError("Scanning error occurred.");
-          }
-        }
-      );
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          deviceId: { exact: selectedDevice },
+          facingMode: "environment",
+        },
+      });
 
-      controlsRef.current = controls;
+      streamRef.current = stream;
+
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
+      }
+
+      scanningRef.current = true;
+      setIsScanning(true);
+      animationRef.current = requestAnimationFrame(() => scanLoopRef.current?.());
     } catch {
       setError("Failed to start camera. Please check permissions.");
-      setIsScanning(false);
     }
-  }, [selectedDevice, handleScanResult]);
+  }, [selectedDevice]);
 
-  const toggleTorch = useCallback(() => {
-    if (controlsRef.current?.switchTorch) {
-      controlsRef.current.switchTorch(!torchOn);
-      setTorchOn((prev) => !prev);
+  const toggleTorch = useCallback(async () => {
+    if (!streamRef.current) return;
+
+    const track = streamRef.current.getVideoTracks()[0];
+    if (!track) return;
+
+    try {
+      const capabilities = track.getCapabilities() as MediaTrackCapabilities & {
+        torch?: boolean;
+      };
+
+      if (!capabilities.torch) {
+        return;
+      }
+
+      const newTorchState = !torchOn;
+      await track.applyConstraints({
+        advanced: [{ torch: newTorchState } as MediaTrackConstraintSet],
+      });
+      setTorchOn(newTorchState);
+    } catch {
+      // Torch not supported
     }
   }, [torchOn]);
 
@@ -116,12 +203,24 @@ export default function BarcodeScanner() {
 
     handleScanResult({
       value: manualInput.trim(),
-      format: BarcodeFormat.QR_CODE,
+      format: "QRCode",
       timestamp: Date.now(),
     });
 
     setManualInput("");
   }, [manualInput, handleScanResult]);
+
+  if (!cameraSupported) {
+    return (
+      <div className="w-full max-w-2xl mx-auto">
+        <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-lg p-6">
+          <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-400 px-4 py-3 rounded-lg text-sm">
+            Camera API is not supported in this browser.
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="w-full max-w-2xl mx-auto">
@@ -134,6 +233,7 @@ export default function BarcodeScanner() {
             playsInline
             muted
           />
+          <canvas ref={canvasRef} className="hidden" />
 
           {/* Scanner Overlay */}
           {isScanning && (

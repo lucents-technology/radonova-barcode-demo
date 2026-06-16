@@ -1,11 +1,10 @@
 "use client";
 
-import { type BarcodeFormat } from "@zxing/library";
 import { getFormatLabel } from "@/lib/barcode-formats";
 
 interface ScanResultProps {
   value: string;
-  format: BarcodeFormat;
+  format: string;
   timestamp: number;
 }
 
