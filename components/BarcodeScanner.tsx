@@ -31,7 +31,7 @@ export default function BarcodeScanner() {
 
   const [isScanning, setIsScanning] = useState(false);
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
-  const [selectedDevice, setSelectedDevice] = useState<string>("");
+  const [selectedDevice, setSelectedDevice] = useState<string>("default");
   const [lastResult, setLastResult] = useState<ScanResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [manualInput, setManualInput] = useState("");
@@ -61,7 +61,7 @@ export default function BarcodeScanner() {
         }
       })
       .catch(() => {
-        setError("No camera devices found.");
+        // Keep "default" — will use facingMode fallback
       });
 
     return () => {
@@ -146,30 +146,67 @@ export default function BarcodeScanner() {
   }, []);
 
   const startScanning = useCallback(async () => {
-    if (!selectedDevice) return;
-
     setError(null);
+    setTorchOn(false);
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          deviceId: { exact: selectedDevice },
-          facingMode: "environment",
-        },
-      });
+      let stream: MediaStream;
+
+      // On iOS Safari, using both deviceId and facingMode causes errors.
+      // Use facingMode only if selectedDevice is "default" or if deviceId fails.
+      try {
+        if (selectedDevice && selectedDevice !== "default") {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              deviceId: { exact: selectedDevice },
+            },
+          });
+        } else {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              facingMode: "environment",
+            },
+          });
+        }
+      } catch {
+        // Fallback: try without deviceId constraint
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+        });
+      }
 
       streamRef.current = stream;
 
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
-        await videoRef.current.play();
+        // iOS Safari requires explicit play() call after user gesture
+        try {
+          await videoRef.current.play();
+        } catch {
+          // If autoplay fails, try muted playback (iOS quirk)
+          videoRef.current.muted = true;
+          await videoRef.current.play();
+        }
       }
 
       scanningRef.current = true;
       setIsScanning(true);
       animationRef.current = requestAnimationFrame(() => scanLoopRef.current?.());
-    } catch {
-      setError("Failed to start camera. Please check permissions.");
+    } catch (err) {
+      console.error("Camera error:", err);
+      if (err instanceof DOMException) {
+        if (err.name === "NotAllowedError") {
+          setError("Camera permission denied. Please allow camera access in Safari Settings > Privacy & Security > Camera.");
+        } else if (err.name === "NotFoundError") {
+          setError("No camera found on this device.");
+        } else if (err.name === "NotReadableError") {
+          setError("Camera is in use by another app. Please close other camera apps and try again.");
+        } else {
+          setError(`Camera error: ${err.message}`);
+        }
+      } else {
+        setError("Failed to start camera. Please check permissions and try again.");
+      }
     }
   }, [selectedDevice]);
 
