@@ -1,8 +1,8 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #09090b;
+  --foreground: #fafafa;
 }
 
 @theme inline {
@@ -12,15 +12,66 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
 body {
   background: var(--background);
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
+}
+
+/* Safe area padding for iOS */
+.pb-safe {
+  padding-bottom: max(0px, env(safe-area-inset-bottom));
+}
+
+/* Scan line animation */
+@keyframes scan-line {
+  0%, 100% { top: 8px; }
+  50% { top: calc(100% - 8px); }
+}
+
+.animate-scan-line {
+  animation: scan-line 2.5s ease-in-out infinite;
+}
+
+/* Slide up animation */
+@keyframes slide-up {
+  from { 
+    opacity: 0; 
+    transform: translateY(20px); 
+  }
+  to { 
+    opacity: 1; 
+    transform: translateY(0); 
+  }
+}
+
+.animate-slide-up {
+  animation: slide-up 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Pulse ring for stop button */
+@keyframes pulse-ring {
+  0% { 
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); 
+  }
+  70% { 
+    box-shadow: 0 0 0 12px rgba(239, 68, 68, 0); 
+  }
+  100% { 
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); 
+  }
+}
+
+.animate-pulse-ring {
+  animation: pulse-ring 1.5s ease-out infinite;
+}
+
+/* Prevent overscroll on iOS */
+html, body {
+  overscroll-behavior: none;
+}
+
+/* Hide scrollbar in modals */
+.overflow-y-auto {
+  -webkit-overflow-scrolling: touch;
 }
